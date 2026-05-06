@@ -50,7 +50,6 @@ jobs:
         contains(github.event.issue.labels.*.name, 'cuga-enabled')
       )
     runs-on: ubuntu-latest
-
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
@@ -196,7 +195,8 @@ jobs:
               msg  = (
                   f"Use the pr-review-fix skill to process PR #{pr} on {repo}. "
                   "Fetch review comments, apply minimal fixes for CodeRabbit critical/major/minor "
-                  "and actionable human comments, commit one fix per commit, push."
+                  "and actionable human comments, commit one fix per commit. "
+                  "Do NOT push — the workflow handles the push after rebasing on the latest PR branch."
               )
               result = await agent.invoke(msg)
               print(result.answer)
@@ -204,7 +204,51 @@ jobs:
           asyncio.run(main())
           EOF
 
-      # ── 11. Post summary comment ─────────────────────────────────────────────
+      # ── 11. Push cuga's commits back to the PR branch ────────────────────────
+      # `gh pr checkout` (step 8) put us on the PR branch with upstream tracking
+      # configured. Cuga committed locally during step 10 but did not push.
+      # We fetch + rebase against the upstream tip first to absorb anything a
+      # reviewer or bot pushed during the run, then push the result. The push
+      # is a no-op if cuga produced no new commits.
+      - name: Push cuga commits to PR branch
+        if: env.CUGA_STOP != 'true'
+        run: |
+          set -euo pipefail
+
+          # Cuga should commit as it goes — a dirty tree here is a bug, not
+          # something to silently auto-stage. Warn and skip the push.
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::warning::Working tree not clean after cuga run; skipping push."
+            git status --short
+            exit 0
+          fi
+
+          UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+          if [ -z "$UPSTREAM" ]; then
+            echo "No upstream tracking branch; nothing to push."
+            exit 0
+          fi
+
+          # Re-sync with the PR branch in case CodeRabbit, a reviewer, or a
+          # since-cancelled concurrent run pushed while cuga ran.
+          git fetch origin
+          if ! git pull --rebase --autostash; then
+            echo "::error::Rebase against $UPSTREAM failed; aborting push."
+            git rebase --abort || true
+            exit 1
+          fi
+
+          LOCAL=$(git rev-parse HEAD)
+          REMOTE=$(git rev-parse "$UPSTREAM")
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "No new commits to push."
+            exit 0
+          fi
+
+          echo "Pushing $(git rev-list --count "$REMOTE..$LOCAL") commit(s) to $UPSTREAM"
+          git push
+
+      # ── 12. Post summary comment ─────────────────────────────────────────────
       - name: Post summary comment on PR
         if: env.CUGA_STOP != 'true'
         env:
