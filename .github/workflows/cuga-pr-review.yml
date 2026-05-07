@@ -248,10 +248,7 @@ jobs:
                   f"This run was triggered by a new comment from @{author}:\n"
                   f"<<<\n{trigger}\n>>>\n\n"
                   f"Use the tools run_command, read_file, write_file, and list_files. "
-                  f"Follow these instructions exactly:\n\n---\n{skill_md}\n---\n\n"
-                  f"IMPORTANT: commit fixes locally but do NOT push. The workflow "
-                  f"will rebase on the latest PR branch and push your commits after "
-                  f"this step."
+                  f"Follow these instructions exactly:\n\n---\n{skill_md}\n---"
               )
 
               agent = CugaAgent(tools=[run_command, read_file, write_file, list_files])
@@ -261,49 +258,5 @@ jobs:
           asyncio.run(main())
           EOF
 
-      # ── 11. Push cuga's commits back to the PR branch ────────────────────────
-      # `gh pr checkout` (step 8) put us on the PR branch with upstream tracking
-      # configured. Cuga committed locally during step 10 but did not push.
-      # We fetch + rebase against the upstream tip first to absorb anything a
-      # reviewer or bot pushed during the run, then push the result. The push
-      # is a no-op if cuga produced no new commits.
-      #
-      # Cuga posts its own reply on the PR inside step 10 (the reply-only
-      # version of the skill), so there is no separate summary comment step.
-      - name: Push cuga commits to PR branch
-        if: env.CUGA_STOP != 'true'
-        run: |
-          set -euo pipefail
-
-          # Cuga should commit as it goes — a dirty tree here is a bug, not
-          # something to silently auto-stage. Warn and skip the push.
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo "::warning::Working tree not clean after cuga run; skipping push."
-            git status --short
-            exit 0
-          fi
-
-          UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-          if [ -z "$UPSTREAM" ]; then
-            echo "No upstream tracking branch; nothing to push."
-            exit 0
-          fi
-
-          # Re-sync with the PR branch in case CodeRabbit, a reviewer, or a
-          # since-cancelled concurrent run pushed while cuga ran.
-          git fetch origin
-          if ! git pull --rebase --autostash; then
-            echo "::error::Rebase against $UPSTREAM failed; aborting push."
-            git rebase --abort || true
-            exit 1
-          fi
-
-          LOCAL=$(git rev-parse HEAD)
-          REMOTE=$(git rev-parse "$UPSTREAM")
-          if [ "$LOCAL" = "$REMOTE" ]; then
-            echo "No new commits to push."
-            exit 0
-          fi
-
-          echo "Pushing $(git rev-list --count "$REMOTE..$LOCAL") commit(s) to $UPSTREAM"
-          git push
+      # In the reply-only version of the skill, cuga posts its own reply inside
+      # the Run step above. No separate summary comment is needed here.
